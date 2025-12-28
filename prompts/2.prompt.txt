@@ -1,0 +1,52 @@
+We've built an app to analyze chess positions, but right now we're outputting huge blocks of text 
+that are hard to properly evaluate.
+
+Let's design a significant upgrade to the generated UX of this app.
+
+Right now, we're doing the following:
+* For a position, considering different candidate moves
+* For each candidate move, analyzing the principal variation associated with it. 
+
+So, for our UX, let's start with the following:
+
+1. At the top, the initial position (shown as a chessboard).
+Whenever we show a chessboard, it should include the valuation,
+player to move,
+and below it a brief LLM discussion of the main considerations
+of that position. Above it, a label (for this one, the label is "Starting position")
+Note that showing descriptions for each position entails a bunch of different LLM prompts,
+which we should of course parallelize. 
+
+2. Below that are arranged, left to right, the N candidate moves we considered. Each 
+formatted as above, with the label as (whatever our associated label for that choice of position is),
+plus the algebraic notation for the associated move to get this position. As always, below it the LLM
+description of this position. 
+
+3. Below each of those positions, in a column, the ensuing positions in the principal variations,
+each labeled with "Engine choice" + the algebraic notation. We should be able to collapse the columns. 
+
+4. At the end of each column, 2 sections, labelled and collapsible:
+ a. The overall analysis of the line: (use my prompts in prompts.txt for this) - 
+    based on the initial position, the summaries we generated earlier for the ensuing plies,
+    what were the consequences and quality of the initial move. 
+    Keep this short - we just need a summary of the overall result, not to output 
+    a breakdown of each move, since we already have that above.
+b. A  comparison of the above line summary to each of the other line summaries, explain what turned out differently 
+for this specific line based on the starting move. 
+
+
+Please write modular code. Feel free to make substantial changes / deletions to the existing code 
+(although I hand-wrote the prompt in prompts.py, so please take advantage of the structure/verbiage 
+of that when writing new prompts for the new stuff.)
+
+All in all, I expect:
+* 1 LLM prompt to get the engine's preferred move at the beginning (which is one of the N lines we look at)
+* 1 LLM prompt to analyze the initial position
+* N * K prompts (N lines x K plies per line) to show the per-ply summaries
+* N prompts to analyze each line at the end
+* N prompts to compare each line summary to the other line summaries
+
+This is a ton of prompts, so a) use a generous parallelism rate limit,
+b) show progress bars throughout.
+
+Good luck!

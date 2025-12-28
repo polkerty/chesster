@@ -12,6 +12,7 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
       - embeds JSON inline (no CORS / fetch issues on file://)
       - uses chessboard.js (frontend) to render boards from FEN
       - sets pieceTheme to a CDN path so piece images actually load
+      - ALSO renders any FEN strings that appear in explanation text as boards inline.
     """
     dist_dir.mkdir(parents=True, exist_ok=True)
 
@@ -64,11 +65,27 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
     }}
     .board {{ width: 360px; }}
     .boardSmall {{ width: 300px; }}
+
     .explain {{
       white-space: pre-wrap;
       line-height: 1.35;
       margin-top: 10px;
     }}
+
+    .fenInline {{
+      margin: 10px 0;
+      padding: 10px;
+      border: 1px solid #eee;
+      background: #fafafa;
+      border-radius: 10px;
+    }}
+    .fenInline code {{
+      display: block;
+      margin-bottom: 8px;
+      white-space: nowrap;
+      overflow-x: auto;
+    }}
+
     details {{ margin-top: 12px; }}
     table {{ border-collapse: collapse; width: 100%; }}
     td, th {{
@@ -167,6 +184,44 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
       return span.outerHTML;
     }}
 
+    // Detect full FEN strings in text and render them as boards inline.
+    // This is intentionally conservative: it looks for 6-field FENs.
+    const FEN_RE = /(?:[prnbqkPRNBQK1-8]+\\/){7}[prnbqkPRNBQK1-8]+\\s+[wb]\\s+(?:-|[KQkq]{1,4})\\s+(?:-|[a-h][36])\\s+\\d+\\s+\\d+/g;
+
+    function renderTextWithFen(containerEl, text, orientation) {{
+      containerEl.textContent = "";
+      const s = String(text || "");
+      let last = 0;
+      let m;
+
+      while ((m = FEN_RE.exec(s)) !== null) {{
+        const start = m.index;
+        const end = start + m[0].length;
+
+        if (start > last) {{
+          containerEl.appendChild(document.createTextNode(s.slice(last, start)));
+        }}
+
+        const fen = m[0];
+
+        const block = document.createElement("div");
+        block.className = "fenInline";
+        block.innerHTML = `<code>${{escapeHtml(fen)}}</code>`;
+
+        const boardHost = document.createElement("div");
+        block.appendChild(boardHost);
+        boardHost.appendChild(createBoardDiv("boardSmall", fen, orientation));
+
+        containerEl.appendChild(block);
+
+        last = end;
+      }}
+
+      if (last < s.length) {{
+        containerEl.appendChild(document.createTextNode(s.slice(last)));
+      }}
+    }}
+
     function main() {{
       const data = getData();
       const orient = orientationFromRequest(data);
@@ -193,7 +248,9 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
         </div>
       `;
 
-      document.getElementById("overall").textContent = data.overall_explanation || "";
+      // Overall explanation: render FENs as boards inline if present.
+      const overallEl = document.getElementById("overall");
+      renderTextWithFen(overallEl, data.overall_explanation || "", orient);
 
       const initRow = document.getElementById("init-board-row");
       initRow.appendChild(createBoardDiv("board", data.initial.fen, orient));
@@ -241,11 +298,15 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
           </details>
 
           <h3>Explanation</h3>
-          <div class="explain">${{escapeHtml(line.explanation || "")}}</div>
+          <div class="explain lineExplain"></div>
         `;
 
         card.querySelector(".startBoard").appendChild(createBoardDiv("board", line.start_fen, orient));
         card.querySelector(".endBoard").appendChild(createBoardDiv("board", line.end_fen, orient));
+
+        // Line explanation: render FENs as boards inline if present.
+        const lineExplainEl = card.querySelector(".lineExplain");
+        renderTextWithFen(lineExplainEl, line.explanation || "", orient);
 
         const tbody = card.querySelector(".pvRows");
         (line.ply || []).forEach((p, idx) => {{
