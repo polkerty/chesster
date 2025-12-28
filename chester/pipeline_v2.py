@@ -57,7 +57,8 @@ async def build_ux_v2_data(
     pv_plies: int,
     multipv: int,
     modal_batch_size: int,
-    gemini_model: str,
+    quick_model: str,
+    smart_model: str,
     llm_concurrency: int,
     llm_max_tokens_short: int,
     llm_max_tokens_long: int,
@@ -66,9 +67,13 @@ async def build_ux_v2_data(
     """
     Produces the structured JSON for UX v2.
 
+    Model selection:
+      - quick_model: per-position summaries (PV node cards)
+      - smart_model: starting position analysis + line overall + comparisons (+ engine pick reason)
+
     Token caps:
-      - short: per-position summaries (starting position + ply cards)
-      - long: line overall + comparisons
+      - short: per-position outputs (starting + PV nodes)
+      - long: line-level outputs (overall + comparisons)
     """
     # ---------------------------
     # ENGINE: get N candidate moves (multipv), plus ensure actual is included.
@@ -173,7 +178,7 @@ async def build_ux_v2_data(
     best_eval = engine_best_line["root_eval"] if engine_best_line else (lines[0]["root_eval"] if lines else {"type": "cp", "cp": 0})
 
     # ---------------------------
-    # LLM(1): engine preferred move confirmation + short reason
+    # LLM(1): engine preferred move confirmation + short reason (SMART model)
     # ---------------------------
     cand_for_llm = [
         {"move_san": l["move_san"], "move_uci": l["move_uci"], "root_eval": l["root_eval"] or {"type": "cp", "cp": 0}}
@@ -186,10 +191,10 @@ async def build_ux_v2_data(
     )
     eng_pick_txt = await gemini_text(
         eng_pick_prompt,
-        model=gemini_model,
+        model=smart_model,
         temperature=0.2,
         max_output_tokens=300,
-        meta={"stage": "engine_preferred_move"},
+        meta={"stage": "engine_preferred_move", "model_role": "smart"},
     )
     eng_pick_obj = extract_json_obj(eng_pick_txt) or {}
     engine_pick_reason = (str(eng_pick_obj.get("short_reason") or "")).strip()
@@ -197,7 +202,7 @@ async def build_ux_v2_data(
     engine_pick_move_san = (str(eng_pick_obj.get("engine_move_san") or "")).strip() or (best_move_san or "")
 
     # ---------------------------
-    # LLM(1): starting position analysis (SHORT cap)
+    # LLM(1): starting position analysis (SMART model, SHORT cap)
     # ---------------------------
     start_prompt = build_starting_position_prompt(
         fen=fen,
@@ -208,14 +213,14 @@ async def build_ux_v2_data(
     )
     starting_summary = await gemini_text(
         start_prompt,
-        model=gemini_model,
+        model=smart_model,
         temperature=0.25,
         max_output_tokens=int(llm_max_tokens_short),
-        meta={"stage": "starting_position"},
+        meta={"stage": "starting_position", "model_role": "smart"},
     )
 
     # ---------------------------
-    # LLM(N*K): per-position summaries (SHORT cap)
+    # LLM(N*K): per-position summaries (QUICK model, SHORT cap)
     # ---------------------------
     node_keys: List[Tuple[str, int]] = []
     node_map: Dict[Tuple[str, int], Dict[str, Any]] = {}
@@ -245,10 +250,10 @@ async def build_ux_v2_data(
         )
         return await gemini_text(
             prompt,
-            model=gemini_model,
+            model=quick_model,
             temperature=0.25,
             max_output_tokens=int(llm_max_tokens_short),
-            meta={"stage": "per_ply_summary", "line_uci": line_uci, "node_idx": idx},
+            meta={"stage": "per_ply_summary", "model_role": "quick", "line_uci": line_uci, "node_idx": idx},
         )
 
     summaries_by_key = await async_map_progress(
@@ -262,7 +267,7 @@ async def build_ux_v2_data(
         node_map[k]["summary"] = (txt or "").strip()
 
     # ---------------------------
-    # LLM(N): line overall analysis (LONG cap)
+    # LLM(N): line overall analysis (SMART model, LONG cap)
     # ---------------------------
     prompts_txt = load_prompts_txt("prompts.txt")
 
@@ -283,10 +288,10 @@ async def build_ux_v2_data(
         )
         return await gemini_text(
             prompt,
-            model=gemini_model,
+            model=smart_model,
             temperature=0.25,
             max_output_tokens=int(llm_max_tokens_long),
-            meta={"stage": "line_overall", "line_uci": uci, "move_san": line["move_san"]},
+            meta={"stage": "line_overall", "model_role": "smart", "line_uci": uci, "move_san": line["move_san"]},
         )
 
     line_overall_by_uci = await async_map_progress(
@@ -300,7 +305,7 @@ async def build_ux_v2_data(
         l["line_overall"] = (line_overall_by_uci.get(l["move_uci"]) or "").strip()
 
     # ---------------------------
-    # LLM(N): comparisons (LONG cap)
+    # LLM(N): comparisons (SMART model, LONG cap)
     # ---------------------------
     async def _line_compare(uci: str) -> str:
         target = next(l for l in lines if l["move_uci"] == uci)
@@ -317,10 +322,10 @@ async def build_ux_v2_data(
         )
         return await gemini_text(
             prompt,
-            model=gemini_model,
+            model=smart_model,
             temperature=0.25,
             max_output_tokens=int(llm_max_tokens_long),
-            meta={"stage": "line_compare", "line_uci": uci, "move_san": target["move_san"]},
+            meta={"stage": "line_compare", "model_role": "smart", "line_uci": uci, "move_san": target["move_san"]},
         )
 
     line_compare_by_uci = await async_map_progress(
@@ -347,6 +352,10 @@ async def build_ux_v2_data(
             "summary": (starting_summary or "").strip(),
         },
         "lines": lines,
+        "llm": {
+            "quick_model": quick_model,
+            "smart_model": smart_model,
+        },
         "token_caps": {
             "short": int(llm_max_tokens_short),
             "long": int(llm_max_tokens_long),

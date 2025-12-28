@@ -81,7 +81,8 @@ async def explain(args: argparse.Namespace) -> int:
         pv_plies=args.pv_plies,
         multipv=args.multipv,
         modal_batch_size=args.modal_batch_size,
-        gemini_model=args.gemini_model,
+        quick_model=args.quick_model,
+        smart_model=args.smart_model,
         llm_concurrency=args.llm_concurrency,
         llm_max_tokens_short=args.llm_max_tokens_short,
         llm_max_tokens_long=args.llm_max_tokens_long,
@@ -138,7 +139,19 @@ def main() -> int:
         help="Max number of parallel Gemini calls (high by design; adjust if rate-limited).",
     )
 
-    # NEW: token caps
+    # NEW: model selection
+    ex.add_argument(
+        "--quick-model",
+        default="gemini-2.5-flash",
+        help="Model used for per-position summaries (PV node cards).",
+    )
+    ex.add_argument(
+        "--smart-model",
+        default="gemini-2.5-pro",
+        help="Model used for strategic analysis (starting position, line overall, comparisons).",
+    )
+
+    # token caps
     ex.add_argument(
         "--llm-max-tokens-short",
         type=int,
@@ -152,7 +165,6 @@ def main() -> int:
         help="Max output tokens for long-form analysis (line overall + line comparisons).",
     )
 
-    ex.add_argument("--gemini-model", default="gemini-2.5-flash")
     ex.add_argument("--quiet", action="store_true")
 
     args = p.parse_args()
