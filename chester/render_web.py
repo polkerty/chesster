@@ -1,110 +1,279 @@
+# chester/render_web.py
 from __future__ import annotations
+
 import json
 from pathlib import Path
 from typing import Any, Dict
 
-INDEX_HTML = """<!doctype html>
+
+def _html_escape(s: str) -> str:
+    return (
+        s.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
+    """
+    Writes a single self-contained HTML file:
+      - embeds JSON inline (no CORS / fetch issues on file://)
+      - uses chessboard.js (frontend) to render boards from FEN
+    """
+    dist_dir.mkdir(parents=True, exist_ok=True)
+
+    data_json = json.dumps(data, indent=2)
+
+    # chessboard.js requires jQuery (per upstream docs). 
+    html = f"""<!doctype html>
 <html>
 <head>
   <meta charset="utf-8"/>
   <title>Chester</title>
+
+  <!-- chessboard.js -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.css"/>
+
   <style>
-    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; margin: 20px; }
-    .row { display: flex; gap: 12px; flex-wrap: wrap; }
-    .card { border: 1px solid #ddd; border-radius: 12px; padding: 14px; margin: 14px 0; width: min(1100px, 100%); }
-    .meta { color: #555; }
-    .pill { display:inline-block; padding:2px 8px; border:1px solid #ccc; border-radius:999px; margin-right:6px; font-size:12px; }
-    .boards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
-    .svgwrap { background:#f7f7f8; border-radius:10px; padding:10px; overflow:auto; }
-    pre { background:#f7f7f8; padding:10px; border-radius:10px; overflow:auto; }
-    details { margin-top: 10px; }
-    .explain { white-space: pre-wrap; line-height: 1.35; }
-    table { border-collapse: collapse; width: 100%; }
-    td, th { border: 1px solid #e5e5e5; padding: 6px; vertical-align: top; }
+    body {{
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial;
+      margin: 20px;
+      color: #111;
+    }}
+    .meta {{ color: #555; }}
+    .pill {{
+      display:inline-block;
+      padding:2px 8px;
+      border:1px solid #ccc;
+      border-radius:999px;
+      margin-right:6px;
+      font-size:12px;
+      background: #fafafa;
+    }}
+    .card {{
+      border: 1px solid #ddd;
+      border-radius: 12px;
+      padding: 14px;
+      margin: 14px 0;
+      width: min(1200px, 100%);
+      box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+    }}
+    .row {{
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      align-items: flex-start;
+    }}
+    .boardWrap {{
+      padding: 10px;
+      background: #f7f7f8;
+      border-radius: 12px;
+      border: 1px solid #eee;
+    }}
+    .board {{
+      width: 360px;
+    }}
+    .boardSmall {{
+      width: 300px;
+    }}
+    .explain {{
+      white-space: pre-wrap;
+      line-height: 1.35;
+      margin-top: 10px;
+    }}
+    details {{ margin-top: 12px; }}
+    table {{ border-collapse: collapse; width: 100%; }}
+    td, th {{
+      border: 1px solid #e5e5e5;
+      padding: 6px;
+      vertical-align: top;
+      font-size: 14px;
+    }}
+    code {{
+      background: #f1f1f1;
+      padding: 2px 6px;
+      border-radius: 6px;
+    }}
   </style>
 </head>
+
 <body>
   <h1 id="title">Chester</h1>
+
   <div id="init"></div>
+
   <h2>Overall explanation</h2>
   <div class="card"><div id="overall" class="explain"></div></div>
+
   <h2>Candidate lines</h2>
   <div id="lines"></div>
 
-<script>
-async function main(){
-  const res = await fetch("./data.json");
-  const data = await res.json();
+  <!-- Inline data: no fetch, no CORS. -->
+  <script id="chester-data" type="application/json">
+{data_json}
+  </script>
 
-  document.getElementById("title").textContent = data.title;
+  <!-- Dependencies for chessboard.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.js"></script>
 
-  document.getElementById("init").innerHTML = `
-    <div class="card">
-      <div class="meta">
-        Side to move: <b>${data.side_to_move}</b> · Requested: ${data.request.player} move ${data.request.move_number} (ply ${data.request.ply_index})
-        ${data.request.corrected ? " · ⚠ corrected ply: " + data.request.corrected_from + " → " + data.request.ply_index : ""}
-      </div>
-      <div class="row">
-        <div class="svgwrap">${data.initial.svg}</div>
-      </div>
-    </div>
-  `;
+  <script>
+    function getData() {{
+      const el = document.getElementById("chester-data");
+      return JSON.parse(el.textContent);
+    }}
 
-  document.getElementById("overall").textContent = data.overall_explanation || "";
+    function orientationFromRequest(data) {{
+      const p = (data?.request?.player || "").toLowerCase();
+      if (p === "black" || p === "b") return "black";
+      return "white";
+    }}
 
-  const linesDiv = document.getElementById("lines");
-  for (const line of data.lines) {
-    const pills = line.labels.map(x => `<span class="pill">${x}</span>`).join("");
-    const pv = line.pv_san.join(" ");
-    const rows = line.ply.map((p,i) => `
-      <tr>
-        <td>${i+1}</td>
-        <td><b>${p.move_san || ""}</b></td>
-        <td>${p.eval_str}</td>
-        <td>W:${p.material.values.white} B:${p.material.values.black} (Δ ${p.material.delta})</td>
-      </tr>
-      <tr>
-        <td colspan="4"><div class="svgwrap">${p.svg}</div></td>
-      </tr>
-    `).join("");
+    function createBoardDiv(className, fen, orientation) {{
+      const wrap = document.createElement("div");
+      wrap.className = "boardWrap";
 
-    linesDiv.innerHTML += `
-      <section class="card">
-        <div>${pills}</div>
-        <h2>${line.move_san} <span class="meta">(root ${line.root_eval_str})</span></h2>
-        <div class="boards">
-          <div>
-            <div class="meta">Start</div>
-            <div class="svgwrap">${line.start_svg}</div>
+      const boardDiv = document.createElement("div");
+      boardDiv.className = className;
+
+      const id = "board_" + Math.random().toString(16).slice(2);
+      boardDiv.id = id;
+
+      wrap.appendChild(boardDiv);
+
+      // chessboard.js can take full FEN; it ignores non-piece-placement fields per docs. 
+      // (But passing full FEN is fine; it will only use the piece placement.)
+      Chessboard(id, {{
+        position: fen,
+        orientation: orientation,
+        draggable: false
+      }});
+
+      return wrap;
+    }}
+
+    function pillHtml(txt) {{
+      const span = document.createElement("span");
+      span.className = "pill";
+      span.textContent = txt;
+      return span.outerHTML;
+    }}
+
+    function escapeHtml(s) {{
+      return String(s)
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;");
+    }}
+
+    function main() {{
+      const data = getData();
+      const orient = orientationFromRequest(data);
+
+      document.getElementById("title").textContent = data.title || "Chester";
+
+      const corrected = data?.request?.corrected;
+      const correctedTxt = corrected ? ` · ⚠ corrected ply: ${{data.request.corrected_from}} → ${{data.request.ply_index}}` : "";
+
+      const init = document.getElementById("init");
+      init.innerHTML = `
+        <div class="card">
+          <div class="meta">
+            Side to move: <b>${{data.side_to_move}}</b> · Requested: ${{data.request.player}} move ${{data.request.move_number}} (ply ${{data.request.ply_index}})${{correctedTxt}}
           </div>
-          <div>
-            <div class="meta">End</div>
-            <div class="svgwrap">${line.end_svg}</div>
+          <div id="init-board-row" class="row" style="margin-top: 10px;"></div>
+          <div class="meta" style="margin-top: 10px;">
+            FEN: <code>${{escapeHtml(data.initial.fen)}}</code>
           </div>
         </div>
+      `;
 
-        <details>
-          <summary><b>PV</b> (${line.classification}) — ${pv}</summary>
-          <table>
-            <thead><tr><th>#</th><th>Move</th><th>Eval</th><th>Material</th></tr></thead>
-            <tbody>${rows}</tbody>
-          </table>
-        </details>
+      const initRow = document.getElementById("init-board-row");
+      initRow.appendChild(createBoardDiv("board", data.initial.fen, orient));
 
-        <h3>Explanation</h3>
-        <div class="explain">${(line.explanation||"").replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")}</div>
-      </section>
-    `;
-  }
-}
-main();
-</script>
+      document.getElementById("overall").textContent = data.overall_explanation || "";
+
+      const linesDiv = document.getElementById("lines");
+      (data.lines || []).forEach((line) => {{
+        const card = document.createElement("section");
+        card.className = "card";
+
+        const pills = (line.labels || []).map(pillHtml).join("");
+
+        const pv = (line.pv_san || []).join(" ");
+
+        const err = line.error ? `<div class="meta" style="margin-top:6px;color:#b00;">Error: ${{escapeHtml(line.error)}}</div>` : "";
+
+        card.innerHTML = `
+          <div>${{pills}}</div>
+          <h2 style="margin: 8px 0 6px 0;">
+            ${{escapeHtml(line.move_san)}} <span class="meta">(root ${{escapeHtml(line.root_eval_str)}})</span>
+          </h2>
+          <div class="meta">Line type: <b>${{escapeHtml(line.classification)}}</b></div>
+          ${{err}}
+          <div class="row" style="margin-top: 10px;">
+            <div>
+              <div class="meta">Start</div>
+              <div class="startBoard"></div>
+              <div class="meta" style="margin-top:6px;">FEN: <code>${{escapeHtml(line.start_fen)}}</code></div>
+            </div>
+            <div>
+              <div class="meta">End</div>
+              <div class="endBoard"></div>
+              <div class="meta" style="margin-top:6px;">FEN: <code>${{escapeHtml(line.end_fen)}}</code></div>
+            </div>
+          </div>
+
+          <details>
+            <summary><b>PV</b> (${{escapeHtml(line.classification)}}) — ${{escapeHtml(pv)}}</summary>
+            <div class="meta" style="margin-top:8px;">(Boards show the position <i>before</i> each listed move, then the final position.)</div>
+            <table style="margin-top:8px;">
+              <thead><tr><th>#</th><th>Move</th><th>Eval</th><th>Material</th><th>Board</th></tr></thead>
+              <tbody class="pvRows"></tbody>
+            </table>
+          </details>
+
+          <h3>Explanation</h3>
+          <div class="explain">${{escapeHtml(line.explanation || "")}}</div>
+        `;
+
+        // Render start/end boards
+        const startSlot = card.querySelector(".startBoard");
+        startSlot.appendChild(createBoardDiv("board", line.start_fen, orient));
+
+        const endSlot = card.querySelector(".endBoard");
+        endSlot.appendChild(createBoardDiv("board", line.end_fen, orient));
+
+        // PV table rows with boards
+        const tbody = card.querySelector(".pvRows");
+        (line.ply || []).forEach((p, idx) => {{
+          const tr = document.createElement("tr");
+          const mv = p.move_san || "";
+          const evalStr = p.eval_str || "";
+          const mat = p.material?.values ? `W:${{p.material.values.white}} B:${{p.material.values.black}} (Δ ${{p.material.delta}})` : "";
+          tr.innerHTML = `
+            <td>${{idx+1}}</td>
+            <td><b>${{escapeHtml(mv)}}</b></td>
+            <td>${{escapeHtml(evalStr)}}</td>
+            <td>${{escapeHtml(mat)}}</td>
+            <td class="pvBoardCell"></td>
+          `;
+          const cell = tr.querySelector(".pvBoardCell");
+          cell.appendChild(createBoardDiv("boardSmall", p.fen, orient));
+          tbody.appendChild(tr);
+        }});
+
+        linesDiv.appendChild(card);
+      }});
+    }}
+
+    main();
+  </script>
 </body>
 </html>
 """
 
-def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
-    dist_dir.mkdir(parents=True, exist_ok=True)
-    (dist_dir / "index.html").write_text(INDEX_HTML, encoding="utf-8")
-    (dist_dir / "data.json").write_text(json.dumps(data, indent=2), encoding="utf-8")
-    return dist_dir / "index.html"
+    out = dist_dir / "index.html"
+    out.write_text(html, encoding="utf-8")
+    return out
