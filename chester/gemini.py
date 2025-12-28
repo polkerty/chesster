@@ -6,13 +6,15 @@ import os
 import re
 import random
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from google import genai
+from google.genai import types
 
 # optional .env (important when importing modules directly from main.py)
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     pass
@@ -68,7 +70,7 @@ def _get_client() -> genai.Client:
     api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
     # Optional Vertex config
-    use_vertex = (os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in ("1", "true", "yes"))
+    use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() in ("1", "true", "yes")
     project = os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GOOGLE_PROJECT")
     location = os.getenv("GOOGLE_CLOUD_LOCATION") or os.getenv("GOOGLE_LOCATION") or "us-central1"
 
@@ -91,6 +93,32 @@ def _get_client() -> genai.Client:
     return _CLIENT
 
 
+def _extract_sdk_meta(resp: Any) -> Dict[str, Any]:
+    """
+    Best-effort capture of finish_reason and usage, across SDK versions.
+    """
+    out: Dict[str, Any] = {}
+    try:
+        cands = getattr(resp, "candidates", None) or []
+        if cands:
+            out["finish_reason"] = getattr(cands[0], "finish_reason", None)
+    except Exception:
+        pass
+
+    try:
+        usage = getattr(resp, "usage_metadata", None)
+        if usage is not None:
+            out["usage"] = {
+                "prompt_token_count": getattr(usage, "prompt_token_count", None),
+                "candidates_token_count": getattr(usage, "candidates_token_count", None),
+                "total_token_count": getattr(usage, "total_token_count", None),
+            }
+    except Exception:
+        pass
+
+    return out
+
+
 async def gemini_text(
     prompt: str,
     *,
@@ -102,32 +130,30 @@ async def gemini_text(
 ) -> str:
     """
     Calls Gemini and logs prompt/output as JSONL.
-    Includes retry/backoff for transient errors (429/5xx-like).
+    Uses types.GenerateContentConfig so max_output_tokens is reliably honored.
+    Includes retry/backoff for transient errors.
     """
 
-    def _call_once() -> str:
+    def _call_once() -> Tuple[str, Dict[str, Any]]:
         client = _get_client()
-        cfg: Dict[str, Any] = {"temperature": temperature}
-        if max_output_tokens is not None:
-            cfg["max_output_tokens"] = int(max_output_tokens)
-
-        try:
-            resp = client.models.generate_content(
-                model=model,
-                contents=prompt,
-                config=cfg,
-            )
-        except TypeError:
-            # SDK signature fallback
-            resp = client.models.generate_content(model=model, contents=prompt)
-        return resp.text or ""
+        cfg = types.GenerateContentConfig(
+            temperature=temperature,
+            max_output_tokens=int(max_output_tokens) if max_output_tokens is not None else None,
+        )
+        resp = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=cfg,
+        )
+        txt = resp.text or ""
+        sdk_meta = _extract_sdk_meta(resp)
+        return txt, sdk_meta
 
     ts = _now_iso()
-    last_err: Optional[Exception] = None
 
     for attempt in range(retries + 1):
         try:
-            txt = await asyncio.to_thread(_call_once)
+            txt, sdk_meta = await asyncio.to_thread(_call_once)
             _append_llm_log(
                 {
                     "ts": ts,
@@ -135,13 +161,13 @@ async def gemini_text(
                     "temperature": temperature,
                     "max_output_tokens": max_output_tokens,
                     "meta": meta or {},
+                    "sdk_meta": sdk_meta,
                     "prompt": prompt,
                     "output": txt,
                 }
             )
             return txt
         except Exception as e:
-            last_err = e
             _append_llm_log(
                 {
                     "ts": ts,
@@ -162,7 +188,7 @@ async def gemini_text(
             jitter = random.random() * 0.4
             await asyncio.sleep(base + jitter)
 
-    raise last_err or RuntimeError("gemini_text failed")
+    raise RuntimeError("gemini_text failed unexpectedly")
 
 
 async def pick_llm_move(
@@ -204,7 +230,7 @@ Legal moves (UCI):
         prompt,
         model=model,
         temperature=0.2,
-        max_output_tokens=200,
+        max_output_tokens=250,
         meta={"stage": "pick_llm_move"},
     )
     obj = _extract_json_obj(txt)

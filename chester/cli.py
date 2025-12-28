@@ -28,8 +28,8 @@ def ply_index_for(move_number: int, player: chess.Color) -> int:
 
 async def explain(args: argparse.Namespace) -> int:
     lichess_token = os.getenv("LICHESS_TOKEN")
-    if not os.getenv("GEMINI_API_KEY"):
-        eprint("Missing GEMINI_API_KEY in environment/.env")
+    if not (os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")):
+        eprint("Missing GEMINI_API_KEY (or GOOGLE_API_KEY) in environment/.env")
         return 2
 
     pgn = await fetch_lichess_pgn(args.lichess_game_id, lichess_token)
@@ -83,6 +83,8 @@ async def explain(args: argparse.Namespace) -> int:
         modal_batch_size=args.modal_batch_size,
         gemini_model=args.gemini_model,
         llm_concurrency=args.llm_concurrency,
+        llm_max_tokens_short=args.llm_max_tokens_short,
+        llm_max_tokens_long=args.llm_max_tokens_long,
         quiet=args.quiet,
     )
 
@@ -134,6 +136,20 @@ def main() -> int:
         type=int,
         default=24,
         help="Max number of parallel Gemini calls (high by design; adjust if rate-limited).",
+    )
+
+    # NEW: token caps
+    ex.add_argument(
+        "--llm-max-tokens-short",
+        type=int,
+        default=900,
+        help="Max output tokens for per-position summaries (starting position + PV node cards).",
+    )
+    ex.add_argument(
+        "--llm-max-tokens-long",
+        type=int,
+        default=1600,
+        help="Max output tokens for long-form analysis (line overall + line comparisons).",
     )
 
     ex.add_argument("--gemini-model", default="gemini-2.5-flash")

@@ -1,7 +1,6 @@
 # chester/pipeline_v2.py
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Dict, List, Tuple, Optional
 
 import chess
@@ -60,16 +59,16 @@ async def build_ux_v2_data(
     modal_batch_size: int,
     gemini_model: str,
     llm_concurrency: int,
+    llm_max_tokens_short: int,
+    llm_max_tokens_long: int,
     quiet: bool,
 ) -> Dict[str, Any]:
     """
     Produces the structured JSON for UX v2.
-    Prompt counts:
-      - 1: engine preferred move (LLM confirms + short reason)
-      - 1: starting position analysis
-      - N*K: per-position summaries (for positions after the first move in each line)
-      - N: overall line analysis
-      - N: line-vs-others comparison
+
+    Token caps:
+      - short: per-position summaries (starting position + ply cards)
+      - long: line overall + comparisons
     """
     # ---------------------------
     # ENGINE: get N candidate moves (multipv), plus ensure actual is included.
@@ -85,18 +84,14 @@ async def build_ux_v2_data(
     engine_candidates = [tm["move_uci"] for tm in top_moves if tm.get("move_uci")]
     candidates = _dedupe_preserve([actual_uci] + engine_candidates)
 
-    # Build labels
-    labels: Dict[str, List[str]] = {}
-    for u in candidates:
-        labels[u] = []
+    # Labels
+    labels: Dict[str, List[str]] = {u: [] for u in candidates}
     labels.setdefault(actual_uci, [])
     if "actual" not in labels[actual_uci]:
         labels[actual_uci].append("actual")
     for i, tm in enumerate(top_moves, start=1):
         u = tm.get("move_uci")
-        if not u:
-            continue
-        if u in labels:
+        if u and u in labels:
             labels[u].append(f"engine#{i}")
 
     # ---------------------------
@@ -112,7 +107,6 @@ async def build_ux_v2_data(
         quiet=quiet,
     )
 
-    # Create per-line base objects
     lines: List[Dict[str, Any]] = []
     for uci in candidates:
         cd = cand_data.get(uci)
@@ -122,18 +116,15 @@ async def build_ux_v2_data(
         pv_uci = cd.get("pv_uci") or []
         pv_san, _ = _pv_san_and_fens(fen, pv_uci)
 
-        # Candidate move SAN from starting board
         try:
             mv = chess.Move.from_uci(uci)
             cand_san = board_pre.san(mv)
         except Exception:
             cand_san = uci
 
-        positions = cd.get("positions") or []  # [{fen, score}] includes start + after each PV ply
-        # We’ll show summaries for positions[1:] (K positions = pv_plies)
+        positions = cd.get("positions") or []  # start + after each PV ply
+
         nodes: List[Dict[str, Any]] = []
-        # Build SAN for each transition (move that led to positions[i])
-        # positions[1] led by pv_san[0] (candidate move), positions[2] led by pv_san[1], etc.
         for idx in range(1, len(positions)):
             fen_i = positions[idx]["fen"]
             score_i = positions[idx]["score"]
@@ -156,7 +147,7 @@ async def build_ux_v2_data(
                     "eval_str": score_to_str(score_i),
                     "move_san": move_san_that_led_here,
                     "material": material_summary(b_i),
-                    "summary": "",  # filled by LLM
+                    "summary": "",
                 }
             )
 
@@ -175,8 +166,8 @@ async def build_ux_v2_data(
             }
         )
 
-    # Determine “engine #1” move (if present)
-    engine_best_uci = top_moves[0]["move_uci"] if top_moves else (lines[0]["move_uci"] if lines else None)
+    # Engine best (by multipv ordering)
+    engine_best_uci = top_moves[0]["move_uci"] if top_moves else (lines[0]["move_uci"] if lines else "")
     engine_best_line = next((l for l in lines if l["move_uci"] == engine_best_uci), None)
     best_move_san = engine_best_line["move_san"] if engine_best_line else (lines[0]["move_san"] if lines else "")
     best_eval = engine_best_line["root_eval"] if engine_best_line else (lines[0]["root_eval"] if lines else {"type": "cp", "cp": 0})
@@ -197,17 +188,16 @@ async def build_ux_v2_data(
         eng_pick_prompt,
         model=gemini_model,
         temperature=0.2,
-        max_output_tokens=250,
+        max_output_tokens=300,
         meta={"stage": "engine_preferred_move"},
     )
     eng_pick_obj = extract_json_obj(eng_pick_txt) or {}
     engine_pick_reason = (str(eng_pick_obj.get("short_reason") or "")).strip()
-    # Best effort: trust our engine_best if parsing fails
     engine_pick_move_uci = (str(eng_pick_obj.get("engine_move_uci") or "")).strip() or (engine_best_uci or "")
     engine_pick_move_san = (str(eng_pick_obj.get("engine_move_san") or "")).strip() or (best_move_san or "")
 
     # ---------------------------
-    # LLM(1): starting position analysis
+    # LLM(1): starting position analysis (SHORT cap)
     # ---------------------------
     start_prompt = build_starting_position_prompt(
         fen=fen,
@@ -220,14 +210,13 @@ async def build_ux_v2_data(
         start_prompt,
         model=gemini_model,
         temperature=0.25,
-        max_output_tokens=450,
+        max_output_tokens=int(llm_max_tokens_short),
         meta={"stage": "starting_position"},
     )
 
     # ---------------------------
-    # LLM(N*K): per-position summaries
+    # LLM(N*K): per-position summaries (SHORT cap)
     # ---------------------------
-    # Key each node by (line_uci, node_idx)
     node_keys: List[Tuple[str, int]] = []
     node_map: Dict[Tuple[str, int], Dict[str, Any]] = {}
     for l in lines:
@@ -236,22 +225,16 @@ async def build_ux_v2_data(
             node_keys.append(k)
             node_map[k] = n
 
-    # Precompute PV context for each node (SAN prefix up to node)
     pv_context: Dict[Tuple[str, int], List[str]] = {}
     for l in lines:
         pv = l["pv_san"] or []
         for n in l["nodes"]:
             idx = int(n["idx"])
-            # positions[idx] is after pv_san[idx-1], so include moves up to idx-1 inclusive
             pv_context[(l["move_uci"], idx)] = pv[: idx]
 
     async def _summarize_node(key: Tuple[str, int]) -> str:
         n = node_map[key]
         line_uci, idx = key
-        # Find line
-        line = next((x for x in lines if x["move_uci"] == line_uci), None)
-        cand_move = line["move_san"] if line else line_uci
-
         prompt = build_position_summary_prompt(
             label=n["label"],
             fen=n["fen"],
@@ -264,22 +247,22 @@ async def build_ux_v2_data(
             prompt,
             model=gemini_model,
             temperature=0.25,
-            max_output_tokens=350,
-            meta={"stage": "per_ply_summary", "line_uci": line_uci, "node_idx": idx, "candidate": cand_move},
+            max_output_tokens=int(llm_max_tokens_short),
+            meta={"stage": "per_ply_summary", "line_uci": line_uci, "node_idx": idx},
         )
 
     summaries_by_key = await async_map_progress(
         node_keys,
         _summarize_node,
         concurrency=llm_concurrency,
-        desc=f"LLM per-ply summaries ({len(node_keys)})",
+        desc=f"LLM per-position summaries ({len(node_keys)})",
         quiet=quiet,
     )
     for k, txt in summaries_by_key.items():
         node_map[k]["summary"] = (txt or "").strip()
 
     # ---------------------------
-    # LLM(N): line overall analysis (uses prompts.txt if present)
+    # LLM(N): line overall analysis (LONG cap)
     # ---------------------------
     prompts_txt = load_prompts_txt("prompts.txt")
 
@@ -302,7 +285,7 @@ async def build_ux_v2_data(
             prompt,
             model=gemini_model,
             temperature=0.25,
-            max_output_tokens=500,
+            max_output_tokens=int(llm_max_tokens_long),
             meta={"stage": "line_overall", "line_uci": uci, "move_san": line["move_san"]},
         )
 
@@ -317,7 +300,7 @@ async def build_ux_v2_data(
         l["line_overall"] = (line_overall_by_uci.get(l["move_uci"]) or "").strip()
 
     # ---------------------------
-    # LLM(N): line comparisons vs others
+    # LLM(N): comparisons (LONG cap)
     # ---------------------------
     async def _line_compare(uci: str) -> str:
         target = next(l for l in lines if l["move_uci"] == uci)
@@ -336,7 +319,7 @@ async def build_ux_v2_data(
             prompt,
             model=gemini_model,
             temperature=0.25,
-            max_output_tokens=450,
+            max_output_tokens=int(llm_max_tokens_long),
             meta={"stage": "line_compare", "line_uci": uci, "move_san": target["move_san"]},
         )
 
@@ -350,8 +333,7 @@ async def build_ux_v2_data(
     for l in lines:
         l["line_compare"] = (line_compare_by_uci.get(l["move_uci"]) or "").strip()
 
-    # Package final data for render_web_v2
-    data: Dict[str, Any] = {
+    return {
         "starting": {
             "label": "Starting position",
             "fen": fen,
@@ -365,5 +347,8 @@ async def build_ux_v2_data(
             "summary": (starting_summary or "").strip(),
         },
         "lines": lines,
+        "token_caps": {
+            "short": int(llm_max_tokens_short),
+            "long": int(llm_max_tokens_long),
+        },
     }
-    return data
