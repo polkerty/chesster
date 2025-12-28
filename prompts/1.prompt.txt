@@ -1,0 +1,10 @@
+We are building an app to analyze chess positions. The source code is below. 
+
+Now, we would like to enhance the output.
+
+Right now, let's focus on just one thing - making it easier to understand/view the chess boards in view.
+A) in the prompts to the LLM, whenever we pass in a FEN, let's make sure to enhance it 
+by also showing the ASCII representation of the board, to help the LLM reason.
+B) in the frontend, likewise, whenever a FEN is mentioned, let's visualize it as a board.
+
+As an aside: Make a log file that includes all prompts sent to LLMs with the output. 

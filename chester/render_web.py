@@ -6,26 +6,17 @@ from pathlib import Path
 from typing import Any, Dict
 
 
-def _html_escape(s: str) -> str:
-    return (
-        s.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-    )
-
-
 def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
     """
     Writes a single self-contained HTML file:
       - embeds JSON inline (no CORS / fetch issues on file://)
       - uses chessboard.js (frontend) to render boards from FEN
+      - sets pieceTheme to a CDN path so piece images actually load
     """
     dist_dir.mkdir(parents=True, exist_ok=True)
 
     data_json = json.dumps(data, indent=2)
 
-    # chessboard.js requires jQuery (per upstream docs). 
     html = f"""<!doctype html>
 <html>
 <head>
@@ -71,12 +62,8 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
       border-radius: 12px;
       border: 1px solid #eee;
     }}
-    .board {{
-      width: 360px;
-    }}
-    .boardSmall {{
-      width: 300px;
-    }}
+    .board {{ width: 360px; }}
+    .boardSmall {{ width: 300px; }}
     .explain {{
       white-space: pre-wrap;
       line-height: 1.35;
@@ -130,24 +117,44 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
       return "white";
     }}
 
+    function escapeHtml(s) {{
+      return String(s)
+        .replaceAll("&","&amp;")
+        .replaceAll("<","&lt;")
+        .replaceAll(">","&gt;");
+    }}
+
+    function fenToPlacement(fen) {{
+      if (!fen) return "8/8/8/8/8/8/8/8";
+      return String(fen).split(" ")[0];
+    }}
+
+    // IMPORTANT: point chessboard.js to piece images that actually exist (CDN).
+    // Otherwise it tries to load local ./img/chesspieces/... and you get broken icons.
+    const PIECE_THEME =
+      "https://raw.githubusercontent.com/oakmac/chessboardjs/master/website/img/chesspieces/wikipedia/{{piece}}.png";
+
     function createBoardDiv(className, fen, orientation) {{
       const wrap = document.createElement("div");
       wrap.className = "boardWrap";
 
       const boardDiv = document.createElement("div");
       boardDiv.className = className;
-
-      const id = "board_" + Math.random().toString(16).slice(2);
-      boardDiv.id = id;
-
       wrap.appendChild(boardDiv);
 
-      // chessboard.js can take full FEN; it ignores non-piece-placement fields per docs. 
-      // (But passing full FEN is fine; it will only use the piece placement.)
-      Chessboard(id, {{
-        position: fen,
-        orientation: orientation,
-        draggable: false
+      const placement = fenToPlacement(fen);
+
+      requestAnimationFrame(() => {{
+        try {{
+          Chessboard(boardDiv, {{
+            position: placement,
+            orientation: orientation,
+            draggable: false,
+            pieceTheme: PIECE_THEME
+          }});
+        }} catch (e) {{
+          console.error("Failed to init Chessboard:", e, {{ fen, placement, orientation }});
+        }}
       }});
 
       return wrap;
@@ -160,13 +167,6 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
       return span.outerHTML;
     }}
 
-    function escapeHtml(s) {{
-      return String(s)
-        .replaceAll("&","&amp;")
-        .replaceAll("<","&lt;")
-        .replaceAll(">","&gt;");
-    }}
-
     function main() {{
       const data = getData();
       const orient = orientationFromRequest(data);
@@ -174,13 +174,17 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
       document.getElementById("title").textContent = data.title || "Chester";
 
       const corrected = data?.request?.corrected;
-      const correctedTxt = corrected ? ` · ⚠ corrected ply: ${{data.request.corrected_from}} → ${{data.request.ply_index}}` : "";
+      const correctedTxt = corrected
+        ? ` · ⚠ corrected ply: ${{data.request.corrected_from}} → ${{data.request.ply_index}}`
+        : "";
 
       const init = document.getElementById("init");
       init.innerHTML = `
         <div class="card">
           <div class="meta">
-            Side to move: <b>${{data.side_to_move}}</b> · Requested: ${{data.request.player}} move ${{data.request.move_number}} (ply ${{data.request.ply_index}})${{correctedTxt}}
+            Side to move: <b>${{data.side_to_move}}</b>
+            · Requested: ${{data.request.player}} move ${{data.request.move_number}} (ply ${{data.request.ply_index}})
+            ${{correctedTxt}}
           </div>
           <div id="init-board-row" class="row" style="margin-top: 10px;"></div>
           <div class="meta" style="margin-top: 10px;">
@@ -189,10 +193,10 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
         </div>
       `;
 
+      document.getElementById("overall").textContent = data.overall_explanation || "";
+
       const initRow = document.getElementById("init-board-row");
       initRow.appendChild(createBoardDiv("board", data.initial.fen, orient));
-
-      document.getElementById("overall").textContent = data.overall_explanation || "";
 
       const linesDiv = document.getElementById("lines");
       (data.lines || []).forEach((line) => {{
@@ -200,10 +204,10 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
         card.className = "card";
 
         const pills = (line.labels || []).map(pillHtml).join("");
-
         const pv = (line.pv_san || []).join(" ");
-
-        const err = line.error ? `<div class="meta" style="margin-top:6px;color:#b00;">Error: ${{escapeHtml(line.error)}}</div>` : "";
+        const err = line.error
+          ? `<div class="meta" style="margin-top:6px;color:#b00;">Error: ${{escapeHtml(line.error)}}</div>`
+          : "";
 
         card.innerHTML = `
           <div>${{pills}}</div>
@@ -227,7 +231,9 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
 
           <details>
             <summary><b>PV</b> (${{escapeHtml(line.classification)}}) — ${{escapeHtml(pv)}}</summary>
-            <div class="meta" style="margin-top:8px;">(Boards show the position <i>before</i> each listed move, then the final position.)</div>
+            <div class="meta" style="margin-top:8px;">
+              (Boards show the position <i>before</i> each listed move, then the final position.)
+            </div>
             <table style="margin-top:8px;">
               <thead><tr><th>#</th><th>Move</th><th>Eval</th><th>Material</th><th>Board</th></tr></thead>
               <tbody class="pvRows"></tbody>
@@ -238,20 +244,18 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
           <div class="explain">${{escapeHtml(line.explanation || "")}}</div>
         `;
 
-        // Render start/end boards
-        const startSlot = card.querySelector(".startBoard");
-        startSlot.appendChild(createBoardDiv("board", line.start_fen, orient));
+        card.querySelector(".startBoard").appendChild(createBoardDiv("board", line.start_fen, orient));
+        card.querySelector(".endBoard").appendChild(createBoardDiv("board", line.end_fen, orient));
 
-        const endSlot = card.querySelector(".endBoard");
-        endSlot.appendChild(createBoardDiv("board", line.end_fen, orient));
-
-        // PV table rows with boards
         const tbody = card.querySelector(".pvRows");
         (line.ply || []).forEach((p, idx) => {{
           const tr = document.createElement("tr");
           const mv = p.move_san || "";
           const evalStr = p.eval_str || "";
-          const mat = p.material?.values ? `W:${{p.material.values.white}} B:${{p.material.values.black}} (Δ ${{p.material.delta}})` : "";
+          const mat = p.material?.values
+            ? `W:${{p.material.values.white}} B:${{p.material.values.black}} (Δ ${{p.material.delta}})`
+            : "";
+
           tr.innerHTML = `
             <td>${{idx+1}}</td>
             <td><b>${{escapeHtml(mv)}}</b></td>
@@ -259,8 +263,8 @@ def write_web(dist_dir: Path, data: Dict[str, Any]) -> Path:
             <td>${{escapeHtml(mat)}}</td>
             <td class="pvBoardCell"></td>
           `;
-          const cell = tr.querySelector(".pvBoardCell");
-          cell.appendChild(createBoardDiv("boardSmall", p.fen, orient));
+
+          tr.querySelector(".pvBoardCell").appendChild(createBoardDiv("boardSmall", p.fen, orient));
           tbody.appendChild(tr);
         }});
 

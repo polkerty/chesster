@@ -65,3 +65,35 @@ def is_tactics_line(start_fen: str, fens: List[str]) -> bool:
 
 def chunked(xs: List[str], n: int) -> List[List[str]]:
     return [xs[i : i + n] for i in range(0, len(xs), n)]
+
+
+# ---------------------------------------------------------------------------
+# ASCII board helpers (coordinate-labeled) for LLM prompts & debugging.
+# ---------------------------------------------------------------------------
+
+def board_to_ascii(board: chess.Board) -> str:
+    """
+    Returns a coordinate-labeled ASCII board (8->1, a->h).
+    Uses python-chess piece symbols: P/N/B/R/Q/K for White, lowercase for Black, '.' for empty.
+    """
+    files = "abcdefgh"
+    header = "  " + " ".join(files)
+    lines: List[str] = [header]
+    for rank in range(7, -1, -1):
+        row = [str(rank + 1)]
+        for file in range(8):
+            sq = chess.square(file, rank)
+            piece = board.piece_at(sq)
+            row.append(piece.symbol() if piece else ".")
+        row.append(str(rank + 1))
+        lines.append(" ".join(row))
+    lines.append(header)
+    return "\n".join(lines)
+
+
+def fen_to_ascii(fen: str) -> str:
+    """
+    Convenience wrapper: parse FEN and render coordinate-labeled ASCII board.
+    """
+    b = chess.Board(fen)
+    return board_to_ascii(b)
