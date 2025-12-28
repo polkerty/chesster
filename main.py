@@ -1,6 +1,3 @@
-def main():
-    print("Hello from chester!")
+from chester.cli import main
 
-
-if __name__ == "__main__":
-    main()
+raise SystemExit(main())

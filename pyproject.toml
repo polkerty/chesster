@@ -1,7 +1,15 @@
 [project]
 name = "chester"
-version = "0.1.0"
-description = "Add your description here"
-readme = "README.md"
-requires-python = ">=3.13"
-dependencies = []
+version = "0.2.0"
+requires-python = ">=3.10"
+dependencies = [
+  "python-dotenv",
+  "httpx",
+  "python-chess",
+  "tqdm",
+  "google-genai",
+  "modal",
+]
+
+[project.scripts]
+chester = "chester.cli:main"

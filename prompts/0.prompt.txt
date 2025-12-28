@@ -1,0 +1,31 @@
+Hello. I am doing some analysis of chess moves with an LLM.
+
+Here are the broad strokes of what I want from the CLI.
+
+1. Python CLI that reads a LICHESS_TOKEN from a .env file to connect to Lichess, and a GEMINI_API_KEY to connect to google's gemini API.
+2. cli like: ./chester explain [lichess_game_id] [move] [player]. Ex, ./chester ONEhTFvE 19 black
+3. The CLI is to interpret this as: Let's understand the position immediately prior to black's move 19,
+and explain the right (and wrong) moves. Here's how we'll do that.
+4. The main concept is: We will consider the principal variations associated with various candidate moves for (black at move 19),
+and use them (and their valuations) to understand what the best move would have been.  
+5. We should use Modal (check their docs) to handle compute for moves; use Stockfish for move evaluations.
+6. Starting with the starting position before the move in question, identify the following 5 moves (which may not all be distinct):
+    a. Top 3 engine moves; b. actual move that was made; c. LLM's preferred move (passing in a PGN + ASCII representation of the board).
+7. For each starting move, perform the following analysis in parallel:
+    a. Consider the top engine line for that move, up to 10 moves out. 
+    b. If there is a material loss for either player, consider this a "tactics" line.
+    c. Otherwise, consider it a "positional" line.
+    d. Construct a prompt, to be passed to the LLM, for analysis of the line: include for each ply [including the initial ply that we are starting the line with, plus the start of the board before the first ply]:
+        i) an ASCII representation of the board, 
+        ii) notation for the next move, 
+        ii) counts of each piece type for both players + the overall sum of "piece value" for each player, plus the engine evaluation. 
+    e. The LLM is to return an explanation for the overall effects / value of making the move at the beginning of the play, 
+       explaining a) the apparent intuition for the move, b) the overall positional and tactical effects of the move, based on the line it's seen. 
+       c) the LLM should try to use language that is instructive for the player, explaining concisely how this move develops.
+    f. Once we have the analysis of each line, have an LLM view all the explanations (plus a summary of the evals + starting and ending board state for each line,
+         and labelling each line with how we got it, ie an engine eval, the actual move etc - if a line comes from multiple sources, label it with all of them)
+       and construct an overall explanation of how to think about the initial board state, plus an explanation of the mistakes in thinking 
+       the player might have made (if material) and suggestions for how to evaluate the initial board state more properly. 
+8. For all of this, leverage threads and Modal to parallelize as much as possible, providing good logs and progress info and error messages throughout.
+9. Output the results to terminal, and also generate and open a web page (writen to dist/) that shows each line with evals and the previously
+mentioned explanations.
