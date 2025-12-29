@@ -113,10 +113,6 @@ def _collect_pv_fens(root_fen: str, pv_uci: List[str], *, max_plies: int) -> Lis
     return out
 
 
-def _signed_by_turn(value: float, turn: chess.Color) -> float:
-    return float(value) if turn == chess.WHITE else -float(value)
-
-
 async def _dist_to_forced_for_color(
     *,
     fens: List[str],
@@ -187,7 +183,7 @@ async def build_rhythm_data(
     *,
     lichess_game_id: str,
     pgn: str,
-    color: chess.Color,
+    color: chess.Color,  # still kept in meta; no longer affects polarity series
     depth: int,
     width: int,
     pv_plies: int,
@@ -226,7 +222,7 @@ async def build_rhythm_data(
         )
         by_depth[d] = res
 
-    # best cp by depth per fen
+    # best cp by depth per fen + best PV
     best_cp_by_fen: Dict[str, List[int]] = {}
     best_pv_at_fen: Dict[str, List[str]] = {}
     for fen in fens:
@@ -240,7 +236,7 @@ async def build_rhythm_data(
         top_moves_deep = (by_depth[depth_max].get(fen) or {}).get("top_moves") or []
         best_pv_at_fen[fen] = _best_pv_uci(top_moves_deep)
 
-    # compute forced-distance for BOTH colors (we'll sign by side-to-move when plotting)
+    # forced-distance for both colors
     dist_white = await _dist_to_forced_for_color(
         fens=fens,
         best_pv_at_fen=best_pv_at_fen,
@@ -260,11 +256,13 @@ async def build_rhythm_data(
         cap_moves=6,
     )
 
-    # build signed series (signed by side-to-move)
+    # series
     ply_labels = list(range(0, nplies + 1))
     eval_series: List[float] = []
-    perplex_signed: List[float] = []
-    forced_signed: List[float] = []
+    perplex_white: List[Optional[float]] = []
+    perplex_black_m: List[Optional[float]] = []
+    forced_white: List[Optional[float]] = []
+    forced_black_m: List[Optional[float]] = []
     stm_series: List[str] = []
 
     for i, fen in enumerate(fens):
@@ -277,14 +275,21 @@ async def build_rhythm_data(
         eval_pawns = _cap(_cp_to_pawns(cp_deep), -6.0, 6.0)
         eval_series.append(eval_pawns)
 
-        perp = _perplexity_segments(cps)
-        perp = min(int(perp), 6)
-        perplex_signed.append(_signed_by_turn(float(perp), turn))
+        perp = min(int(_perplexity_segments(cps)), 6)
+        fw = min(int(dist_white[i]), 6)
+        fb = min(int(dist_black[i]), 6)
 
-        # moves-until-forced: use the value for the side to move at this position
-        dist = dist_white[i] if turn == chess.WHITE else dist_black[i]
-        dist = min(int(dist), 6)
-        forced_signed.append(_signed_by_turn(float(dist), turn))
+        # Split series: only populate the side-to-move’s value; the other side is null to create "gapped" lines
+        if turn == chess.WHITE:
+            perplex_white.append(float(perp))
+            perplex_black_m.append(None)
+            forced_white.append(float(fw))
+            forced_black_m.append(None)
+        else:
+            perplex_white.append(None)
+            perplex_black_m.append(-float(perp))
+            forced_white.append(None)
+            forced_black_m.append(-float(fb))
 
     # time series (black mirrored negative)
     time_white: List[Optional[float]] = []
@@ -316,9 +321,11 @@ async def build_rhythm_data(
         },
         "series": {
             "ply": ply_labels,
-            "eval_pawns": eval_series,                 # [-6, 6]
-            "perplexity_signed": perplex_signed,       # [-6, 6], sign by side-to-move
-            "forced_dist_signed": forced_signed,       # [-6, 6], sign by side-to-move
+            "eval_pawns": eval_series,                      # [-6, 6]
+            "perplexity_white": perplex_white,             # [0, 6] or null
+            "perplexity_black_mirrored": perplex_black_m,  # [-6, 0] or null
+            "forced_dist_white": forced_white,             # [0, 6] or null
+            "forced_dist_black_mirrored": forced_black_m,  # [-6, 0] or null
             "time_white_sec": time_white,
             "time_black_sec_mirrored": time_black,
         },
