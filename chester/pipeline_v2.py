@@ -1,7 +1,7 @@
 # chester/pipeline_v2.py
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple
 
 import chess
 
@@ -10,10 +10,10 @@ from .chess_utils import score_to_str, material_summary
 from .gemini import gemini_text, extract_json_obj
 from .prompts_v2 import (
     build_engine_choice_prompt,
-    build_starting_position_prompt,
     build_position_summary_prompt,
     build_line_overall_prompt,
     build_line_compare_prompt,
+    build_global_overview_prompt,
     load_prompts_txt,
 )
 from .modal_client import get_top_moves_modal, analyse_candidates_modal_batched
@@ -64,17 +64,6 @@ async def build_ux_v2_data(
     llm_max_tokens_long: int,
     quiet: bool,
 ) -> Dict[str, Any]:
-    """
-    Produces the structured JSON for UX v2.
-
-    Model selection:
-      - quick_model: per-position summaries (PV node cards)
-      - smart_model: starting position analysis + line overall + comparisons (+ engine pick reason)
-
-    Token caps:
-      - short: per-position outputs (starting + PV nodes)
-      - long: line-level outputs (overall + comparisons)
-    """
     # ---------------------------
     # ENGINE: get N candidate moves (multipv), plus ensure actual is included.
     # ---------------------------
@@ -175,10 +164,12 @@ async def build_ux_v2_data(
     engine_best_uci = top_moves[0]["move_uci"] if top_moves else (lines[0]["move_uci"] if lines else "")
     engine_best_line = next((l for l in lines if l["move_uci"] == engine_best_uci), None)
     best_move_san = engine_best_line["move_san"] if engine_best_line else (lines[0]["move_san"] if lines else "")
-    best_eval = engine_best_line["root_eval"] if engine_best_line else (lines[0]["root_eval"] if lines else {"type": "cp", "cp": 0})
+    best_eval = engine_best_line["root_eval"] if engine_best_line else (
+        lines[0]["root_eval"] if lines else {"type": "cp", "cp": 0}
+    )
 
     # ---------------------------
-    # LLM(1): engine preferred move confirmation + short reason (SMART model)
+    # LLM(1): engine preferred move confirmation + short reason (SMART)
     # ---------------------------
     cand_for_llm = [
         {"move_san": l["move_san"], "move_uci": l["move_uci"], "root_eval": l["root_eval"] or {"type": "cp", "cp": 0}}
@@ -200,24 +191,6 @@ async def build_ux_v2_data(
     engine_pick_reason = (str(eng_pick_obj.get("short_reason") or "")).strip()
     engine_pick_move_uci = (str(eng_pick_obj.get("engine_move_uci") or "")).strip() or (engine_best_uci or "")
     engine_pick_move_san = (str(eng_pick_obj.get("engine_move_san") or "")).strip() or (best_move_san or "")
-
-    # ---------------------------
-    # LLM(1): starting position analysis (SMART model, SHORT cap)
-    # ---------------------------
-    start_prompt = build_starting_position_prompt(
-        fen=fen,
-        side_to_move=side_name(board_pre.turn),
-        best_eval=best_eval or {"type": "cp", "cp": 0},
-        best_move_san=engine_pick_move_san,
-        best_move_reason=engine_pick_reason or "(no reason returned)",
-    )
-    starting_summary = await gemini_text(
-        start_prompt,
-        model=smart_model,
-        temperature=0.25,
-        max_output_tokens=int(llm_max_tokens_short),
-        meta={"stage": "starting_position", "model_role": "smart"},
-    )
 
     # ---------------------------
     # LLM(N*K): per-position summaries (QUICK model, SHORT cap)
@@ -338,6 +311,45 @@ async def build_ux_v2_data(
     for l in lines:
         l["line_compare"] = (line_compare_by_uci.get(l["move_uci"]) or "").strip()
 
+    # ---------------------------
+    # NEW: Global overview at the top (SMART model, LONG cap)
+    # ---------------------------
+    lines_compact: List[Dict[str, Any]] = []
+    for l in lines:
+        final_node = l["nodes"][-1] if l["nodes"] else None
+        final_eval_str = final_node["eval_str"] if final_node else l["root_eval_str"]
+        final_fen = final_node["fen"] if final_node else fen
+        final_summary = final_node["summary"] if final_node else ""
+
+        lines_compact.append(
+            {
+                "move_san": l["move_san"],
+                "labels": l.get("labels") or [],
+                "root_eval_str": l["root_eval_str"],
+                "final_eval_str": final_eval_str,
+                "final_fen": final_fen,
+                "final_summary": final_summary,
+                "line_overall": l.get("line_overall") or "",
+                "line_compare": l.get("line_compare") or "",
+            }
+        )
+
+    global_prompt = build_global_overview_prompt(
+        fen_start=fen,
+        side_to_move=side_name(board_pre.turn),
+        engine_best_move_san=engine_pick_move_san or best_move_san,
+        engine_best_reason=engine_pick_reason or "(no reason returned)",
+        actual_move_san=actual_san,
+        lines_compact=lines_compact,
+    )
+    global_overview = await gemini_text(
+        global_prompt,
+        model=smart_model,
+        temperature=0.25,
+        max_output_tokens=int(llm_max_tokens_long),
+        meta={"stage": "global_overview", "model_role": "smart"},
+    )
+
     return {
         "starting": {
             "label": "Starting position",
@@ -349,7 +361,8 @@ async def build_ux_v2_data(
                 "move_san": engine_pick_move_san,
                 "reason": engine_pick_reason,
             },
-            "summary": (starting_summary or "").strip(),
+            # NOTE: this is now the holistic overview, not a board-only summary
+            "summary": (global_overview or "").strip(),
         },
         "lines": lines,
         "llm": {
