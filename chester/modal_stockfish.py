@@ -14,6 +14,7 @@ image = (
     .pip_install("python-chess")
 )
 
+
 def _find_stockfish() -> str:
     path = shutil.which("stockfish")
     if path:
@@ -23,6 +24,7 @@ def _find_stockfish() -> str:
             return p
     raise RuntimeError("Stockfish not found in Modal image (unexpected).")
 
+
 def _score_to_dict(score: chess.engine.PovScore) -> Dict[str, Any]:
     s = score.pov(chess.WHITE)  # normalize to White POV
     mate = s.mate()
@@ -30,6 +32,7 @@ def _score_to_dict(score: chess.engine.PovScore) -> Dict[str, Any]:
         return {"type": "mate", "mate": int(mate)}
     cp = s.score()
     return {"type": "cp", "cp": int(cp) if cp is not None else 0}
+
 
 @app.function(image=image, timeout=600, cpu=2)
 def top_engine_moves(
@@ -64,6 +67,69 @@ def top_engine_moves(
                 }
             )
         return {"top_moves": top}
+
+
+@app.function(image=image, timeout=900, cpu=2)
+def analyse_fens_batch(
+    fens: List[str],
+    depth: int = 16,
+    multipv: int = 3,
+    pv_plies: int = 10,
+) -> Dict[str, Any]:
+    """
+    Analyze many independent positions in one engine process.
+
+    Returns:
+      {
+        "by_fen": {
+          fen: {
+            "top_moves": [
+              {"move_uci","score","pv_uci":[...]}
+            ]
+          },
+          ...
+        }
+      }
+    """
+    stockfish_path = _find_stockfish()
+    out: Dict[str, Any] = {"by_fen": {}}
+
+    with chess.engine.SimpleEngine.popen_uci(stockfish_path) as engine:
+        for fen in fens:
+            try:
+                board = chess.Board(fen)
+            except Exception:
+                out["by_fen"][fen] = {"top_moves": [], "error": "invalid_fen"}
+                continue
+
+            try:
+                infos = engine.analyse(
+                    board,
+                    chess.engine.Limit(depth=depth),
+                    multipv=multipv,
+                    info=chess.engine.INFO_SCORE | chess.engine.INFO_PV,
+                )
+                if isinstance(infos, dict):
+                    infos = [infos]
+
+                top = []
+                for info in infos:
+                    pv = info.get("pv") or []
+                    if not pv:
+                        continue
+                    top.append(
+                        {
+                            "move_uci": pv[0].uci(),
+                            "score": _score_to_dict(info["score"]),
+                            "pv_uci": [m.uci() for m in pv[: max(1, pv_plies)]],
+                        }
+                    )
+                out["by_fen"][fen] = {"top_moves": top}
+            except Exception as e:
+                out["by_fen"][fen] = {"top_moves": [], "error": str(e)}
+
+    return out
+
 
 @app.function(image=image, timeout=600, cpu=2)
 def analyse_batch(

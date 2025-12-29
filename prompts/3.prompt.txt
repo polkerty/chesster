@@ -1,0 +1,27 @@
+We are writing a CLI to help us analyze chess games. The code below already has a command explain <game> <move> <color>. 
+We want to add a new command called rhythm <game> <color>. 
+
+This command starts by doing the following:  
+
+0. From the Lichess API, fetch the game (plus timings.) EG <cli> rhythm za1MA34h  white
+1. Use Modal to get evals for the entire game (for --width principal variations for each position,
+for --depth plies.) Perform this analysis at depths of 1, 2, 4, ... 2^n <= depth plies for each position.
+ (As you can see, we currently have a setup where we can parallelize calls to Modal that batch analyses of individual moves.) 
+2. Define a "forced move" as a position where there is a gap of >= 100 centipawns between the best move and next best move. 
+3. Generate an HTML file (opened in the browser) that shows the following:
+
+A. An X-axis which is the ply number from left to right, and the following series:
+B. The  eval of the game, where white = positive and black = negative, capping out at +-4
+C. # of moves (per the deepest principal variation immediately before the move) until 
+there is a forced move for the <color> player (set in the cli args above). Cap this at 6 moves.
+If the current move is forced, then perplexity = 0. 
+D. Perplexity of the position, defined as follows - this is a bit tricky -
+    Perplexity = number of times the eval reversed when considering different depths at the position.
+    if e.g. at depth 1, 2, 4 the eval favors white, but at depth 8 black, and at 16 white again, then perplexity=3. 
+E. Time budget - We will do this in a fun way. Use a different Y-axis for this. White is a series above the x-axis 
+trending towards 0, black a series below the y-axis trending towards 0. Both start at the # of seconds of the 
+overall time control. Then at move M for the player, the value is the time left (although for black we mirror
+vertically,
+so working up from below, so to speak.)
+
+Current code below:

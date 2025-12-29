@@ -1,14 +1,17 @@
 from __future__ import annotations
+
 import asyncio
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 import modal
 
 from .modal_stockfish import app as modal_app
 from .modal_stockfish import top_engine_moves as modal_top_engine_moves
 from .modal_stockfish import analyse_batch as modal_analyse_batch
+from .modal_stockfish import analyse_fens_batch as modal_analyse_fens_batch
 
 from .chess_utils import chunked
+
 
 async def get_top_moves_modal(
     fen: str,
@@ -24,6 +27,39 @@ async def get_top_moves_modal(
                 lambda: modal_top_engine_moves.remote(fen, depth=depth, multipv=multipv, pv_plies=pv_plies)
             )
     return res.get("top_moves", [])
+
+
+async def analyse_positions_modal_batched(
+    fens: List[str],
+    *,
+    depth: int,
+    multipv: int,
+    pv_plies: int,
+    modal_batch_size: int,
+    quiet: bool,
+) -> Dict[str, Any]:
+    """
+    Analyze many independent positions, batching fens per Modal call.
+    Returns: { fen: {"top_moves":[...]} }
+    """
+    batches = chunked(list(fens), max(1, int(modal_batch_size)))
+    merged: Dict[str, Any] = {}
+
+    async def run_one(batch: List[str]) -> Dict[str, Any]:
+        return await asyncio.to_thread(
+            lambda: modal_analyse_fens_batch.remote(batch, depth=depth, multipv=multipv, pv_plies=pv_plies)
+        )
+
+    with modal.enable_output(show_progress=not quiet):
+        with modal_app.run():
+            tasks = [asyncio.create_task(run_one(b)) for b in batches]
+            results = await asyncio.gather(*tasks)
+            for r in results:
+                by_fen = (r or {}).get("by_fen", {}) or {}
+                merged.update(by_fen)
+
+    return merged
+
 
 async def analyse_candidates_modal_batched(
     fen: str,

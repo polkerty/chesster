@@ -17,6 +17,9 @@ from .chess_utils import parse_player
 from .pipeline_v2 import build_ux_v2_data, side_name
 from .render_web_v2 import write_web_v2
 
+from .rhythm_pipeline import build_rhythm_data
+from .render_rhythm import write_rhythm_html
+
 
 def eprint(*a: Any) -> None:
     print(*a, file=sys.stderr)
@@ -115,6 +118,34 @@ async def explain(args: argparse.Namespace) -> int:
     return 0
 
 
+async def rhythm(args: argparse.Namespace) -> int:
+    lichess_token = os.getenv("LICHESS_TOKEN")
+
+    pgn = await fetch_lichess_pgn(args.lichess_game_id, lichess_token)
+    color = parse_player(args.player)
+
+    data = await build_rhythm_data(
+        lichess_game_id=args.lichess_game_id,
+        pgn=pgn,
+        color=color,
+        depth=args.depth,
+        width=args.width,
+        pv_plies=args.pv_plies,
+        modal_batch_size=args.modal_batch_size,
+        quiet=args.quiet,
+    )
+
+    out = write_rhythm_html(Path("dist"), data)
+    eprint(f"Wrote {out}")
+
+    try:
+        webbrowser.open(f"file://{out.resolve()}")
+    except Exception:
+        pass
+
+    return 0
+
+
 def main() -> int:
     load_dotenv()
     p = argparse.ArgumentParser(prog="chester")
@@ -167,9 +198,21 @@ def main() -> int:
 
     ex.add_argument("--quiet", action="store_true")
 
+    rh = sub.add_parser("rhythm")
+    rh.add_argument("lichess_game_id")
+    rh.add_argument("player", help="white|black")
+    rh.add_argument("--depth", type=int, default=16, help="Max Stockfish depth (plies).")
+    rh.add_argument("--width", type=int, default=4, help="MultiPV width per position.")
+    rh.add_argument("--pv-plies", type=int, default=24, help="PV length requested per position.")
+    rh.add_argument("--modal-batch-size", type=int, default=16, help="Batch size (positions per Modal call).")
+    rh.add_argument("--quiet", action="store_true")
+
     args = p.parse_args()
 
     if args.cmd == "explain":
         return asyncio.run(explain(args))
+
+    if args.cmd == "rhythm":
+        return asyncio.run(rhythm(args))
 
     return 0
